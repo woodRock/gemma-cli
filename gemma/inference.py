@@ -139,21 +139,46 @@ class LocalEngine:
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
 
-# ── tool-call parsing ─────────────────────────────────────────────────────────
+# ── tool-call / thought parsing ───────────────────────────────────────────────
+# Gemma 4 native format:
+#   thoughts  →  <|channel>thought ... <channel|>
+#   tool call →  <|tool_call>call:TOOL{key:<|"|>val<|"|>,...}<tool_call|>
 
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_THOUGHT_RE   = re.compile(r"<\|channel\s*>thought(.*?)<channel\s*\|>", re.DOTALL)
+_TOOL_CALL_RE = re.compile(r"<\|tool_call\s*>call:(\w+)\{(.*?)\}<tool_call\s*\|>", re.DOTALL)
+# Handles both quoted  →  key:<|"|>value<|"|>
+#        and unquoted  →  key:value  (up to next comma or closing brace)
+_PARAM_RE = re.compile(
+    r'(\w+):'
+    r'(?:<\|"\|>(.*?)<\|"\|>|([^,}\n<][^,}\n]*))',
+    re.DOTALL,
+)
+
+
+def _clean_value(v: str) -> str:
+    """Strip markdown backtick formatting that the model sometimes wraps values in."""
+    return v.strip().strip("`")
 
 
 def parse_tool_calls(text: str) -> tuple[str, list]:
+    """Return (clean_text, tool_calls) from a raw Gemma 4 response."""
     calls = []
-    for match in _TOOL_CALL_RE.finditer(text):
-        try:
-            payload = json.loads(match.group(1))
-            calls.append({
-                "name": payload.get("name", ""),
-                "arguments": payload.get("arguments", payload.get("args", {})),
-            })
-        except json.JSONDecodeError:
-            pass
-    clean = _TOOL_CALL_RE.sub("", text).strip()
+    for m in _TOOL_CALL_RE.finditer(text):
+        tool_name  = m.group(1)
+        params_raw = m.group(2)
+        # group(2) = quoted value, group(3) = unquoted value
+        args = {
+            pm.group(1): _clean_value(
+                pm.group(2) if pm.group(2) is not None else pm.group(3).strip()
+            )
+            for pm in _PARAM_RE.finditer(params_raw)
+        }
+        calls.append({"name": tool_name, "arguments": args})
+
+    clean = _TOOL_CALL_RE.sub("", text)
+    clean = _THOUGHT_RE.sub("", clean).strip()
     return clean, calls
+
+
+def extract_thoughts(text: str) -> list[str]:
+    return [m.group(1).strip() for m in _THOUGHT_RE.finditer(text)]

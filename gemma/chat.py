@@ -45,12 +45,14 @@ class ChatSession:
         max_new_tokens = self.config.get("max_new_tokens", 2048)
         show_tools = self.config.get("show_tool_calls", True)
 
-        # Gemma tokenizers expect bare function dicts, not the OpenAI wrapper
         tools_schema = [
             {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"],
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["parameters"],
+                },
             }
             for t in TOOL_DECLARATIONS
         ]
@@ -87,7 +89,10 @@ class ChatSession:
                         vs = str(v)
                         console.print(f"  [dim]{k}:[/] {vs[:120]}{'…' if len(vs) > 120 else ''}")
 
-                result = execute(name, args)
+                try:
+                    result = execute(name, args)
+                except TypeError as e:
+                    result = f"Error: {e}\nParsed args: {args}"
 
                 if show_tools:
                     preview = result[:300] + "…" if len(result) > 300 else result
@@ -108,8 +113,26 @@ class ChatSession:
         temperature: float,
         max_new_tokens: int,
     ) -> str:
-        """Stream tokens to stdout and return the full raw response string."""
-        accumulated = []
+        """
+        Stream tokens, routing them through a state machine:
+          - plain text      → printed live to stdout
+          - <|channel>thought → buffered, shown dim after streaming ends
+          - <|tool_call>    → buffered silently (parsed after streaming ends)
+        Returns the full raw response string for downstream parsing.
+        """
+        full    = []   # every token
+        visible = []   # plain-text tokens shown live
+
+        # States: "text" | "thought" | "tool_call"
+        state  = "text"
+        buf    = ""    # lookahead buffer for partial special-token detection
+
+        OPEN_THOUGHT   = "<|channel>"
+        CLOSE_THOUGHT  = "<channel|>"
+        OPEN_TOOL      = "<|tool_call>"
+        CLOSE_TOOL     = "<tool_call|>"
+        SENTINELS      = (OPEN_THOUGHT, CLOSE_THOUGHT, OPEN_TOOL, CLOSE_TOOL)
+
         try:
             for token in engine.stream(
                 self.history,
@@ -117,12 +140,50 @@ class ChatSession:
                 temperature=temperature,
                 max_new_tokens=max_new_tokens,
             ):
-                sys.stdout.write(token)
-                sys.stdout.flush()
-                accumulated.append(token)
+                full.append(token)
+                buf += token
+
+                # Flush safe prefix that can't be the start of a sentinel
+                while buf:
+                    # Check if any sentinel starts with the current buf prefix
+                    could_be_sentinel = any(s.startswith(buf) or buf.startswith(s) for s in SENTINELS)
+
+                    # Consume completed sentinels
+                    if buf.startswith(OPEN_THOUGHT):
+                        state = "thought"
+                        buf   = buf[len(OPEN_THOUGHT):]
+                    elif buf.startswith(CLOSE_THOUGHT):
+                        state = "text"
+                        buf   = buf[len(CLOSE_THOUGHT):]
+                    elif buf.startswith(OPEN_TOOL):
+                        state = "tool_call"
+                        buf   = buf[len(OPEN_TOOL):]
+                    elif buf.startswith(CLOSE_TOOL):
+                        state = "text"
+                        buf   = buf[len(CLOSE_TOOL):]
+                    elif not any(s.startswith(buf) for s in SENTINELS):
+                        # No sentinel can start with what's in buf — flush one char
+                        ch  = buf[0]
+                        buf = buf[1:]
+                        if state == "text":
+                            sys.stdout.write(ch)
+                            sys.stdout.flush()
+                            visible.append(ch)
+                    else:
+                        break  # need more tokens to decide
+
         except KeyboardInterrupt:
             console.print("\n[dim](interrupted)[/]")
 
         sys.stdout.write("\n")
         sys.stdout.flush()
-        return "".join(accumulated)
+
+        raw = "".join(full)
+
+        # Show any captured thoughts dimly
+        from gemma.inference import extract_thoughts
+        for thought in extract_thoughts(raw):
+            if thought:
+                console.print(f"[dim italic]💭 {thought}[/]")
+
+        return raw

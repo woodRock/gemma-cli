@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / compiled files
+__pycache__/
+*.pyc
+*.pyd
+
+# Virtual environment
+venv/
+env/
+
+# Operating System
+.DS_Store
+
+# Logs and temp files
+*.log
+tmp/
+
+# Distributions / builds
+dist/
+build/
