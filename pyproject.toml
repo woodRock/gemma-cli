@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gemma-cli"
+version = "0.1.0"
+description = "A blazingly fast Gemma 4 CLI"
+requires-python = ">=3.9"
+dependencies = [
+    "rich>=13.7",
+    "prompt-toolkit>=3.0",
+    "google-genai>=1.0",
+]
+
+[project.scripts]
+gemma = "gemma.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gemma"]
