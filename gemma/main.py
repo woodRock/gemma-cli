@@ -21,30 +21,25 @@ PROMPT_STYLE = Style.from_dict({
 
 def _bottom_toolbar(session: ChatSession):
     from gemma.models import get_model
+    from gemma.inference import detect_device
     model = get_model(session.config.get("model", "e4b"))
-    return HTML(f'<b><style fg="ansicyan"> ◈ {model.name}</style></b>'
-                f'<style fg="ansibrightblack">  /help · /model · /reset · /exit</style>')
+    device = detect_device()
+    return HTML(
+        f'<b><style fg="ansicyan"> ◈ {model.name}</style></b>'
+        f'<style fg="ansibrightblack">  {device}  ·  /help · /model · /pull · /reset · /exit</style>'
+    )
 
 
 def main():
     os.system("clear")
-
     config = cfg.load()
     show_splash(config)
 
-    api_key = cfg.get_api_key(config)
-    if not api_key:
-        console.print("[bold red]No API key found.[/]")
-        console.print("[dim]Set [bold]GEMINI_API_KEY[/] in your environment or run:[/]")
-        console.print("[dim]  export GEMINI_API_KEY=your-key[/]")
-        console.print()
-
     session = ChatSession(config)
 
-    history_path = cfg.HISTORY_FILE
     cfg.ensure_dirs()
     prompt_session: PromptSession = PromptSession(
-        history=FileHistory(str(history_path)),
+        history=FileHistory(str(cfg.HISTORY_FILE)),
         style=PROMPT_STYLE,
         bottom_toolbar=lambda: _bottom_toolbar(session),
         mouse_support=False,
@@ -53,9 +48,7 @@ def main():
 
     while True:
         try:
-            raw = prompt_session.prompt(
-                HTML('<prompt>◈ </prompt>'),
-            ).strip()
+            raw = prompt_session.prompt(HTML('<prompt>◈ </prompt>')).strip()
         except KeyboardInterrupt:
             console.print("\n[dim](Use /exit to quit)[/]")
             continue
@@ -66,7 +59,6 @@ def main():
         if not raw:
             continue
 
-        # Skill / slash-command handling
         result = handle_skill(session, raw)
         if result is False:
             console.print("[dim]Goodbye.[/]")
@@ -74,7 +66,6 @@ def main():
         if result is True:
             continue
 
-        # Regular message → send to model
         try:
             session.send(raw)
         except KeyboardInterrupt:

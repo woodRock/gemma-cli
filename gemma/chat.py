@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import sys
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.text import Text
+
+from gemma.inference import LocalEngine, parse_tool_calls
+from gemma.config import MODEL_CACHE_DIR
 
 console = Console()
 
@@ -10,161 +13,117 @@ console = Console()
 class ChatSession:
     def __init__(self, config: dict):
         self.config = config
-        self.history: list[dict] = []
-        self._client = None
-        self._setup_client()
+        self._engine: LocalEngine | None = None
+        self._current_model_key: str = ""
+        self.history: list[dict] = []   # OpenAI-style message dicts
 
-    def _setup_client(self):
-        from gemma.config import get_api_key
-        api_key = get_api_key(self.config)
-        if not api_key:
-            console.print("[bold red]Error:[/] No API key found.")
-            console.print("[dim]Set the [bold]GEMINI_API_KEY[/] environment variable, or add it to [bold]~/.gemma/config.json[/].[/]")
-            sys.exit(1)
-        try:
-            from google import genai
-            self._client = genai.Client(api_key=api_key)
-        except ImportError:
-            console.print("[bold red]Error:[/] google-genai not installed.")
-            console.print("[dim]Run: pip install google-genai[/]")
-            sys.exit(1)
+    # ── engine management ──────────────────────────────────────────────────────
+
+    def _get_engine(self) -> LocalEngine:
+        from gemma.models import get_model
+        key = self.config.get("model", "e4b")
+        if self._engine is None or self._current_model_key != key:
+            if self._engine is not None:
+                self._engine.unload()
+            model = get_model(key)
+            self._engine = LocalEngine(model.hf_id, MODEL_CACHE_DIR)
+            self._engine.load()
+            self._current_model_key = key
+        return self._engine
 
     def reset(self):
         self.history = []
 
-    @property
-    def _model_id(self) -> str:
-        from gemma.models import get_model
-        return get_model(self.config.get("model", "e4b")).id
+    # ── sending a message ──────────────────────────────────────────────────────
 
-    def send(self, message: str):
-        from google import genai  # noqa: F401
-        from google.genai import types
+    def send(self, user_message: str):
         from gemma.tools import TOOL_DECLARATIONS, execute
 
-        self.history.append({"role": "user", "content": message})
+        self.history.append({"role": "user", "content": user_message})
+        engine = self._get_engine()
 
-        tool_declarations = [
-            types.FunctionDeclaration(
-                name=t["name"],
-                description=t["description"],
-                parameters=t["parameters"],
-            )
+        temperature = self.config.get("temperature", 0.7)
+        max_new_tokens = self.config.get("max_new_tokens", 2048)
+        show_tools = self.config.get("show_tool_calls", True)
+
+        # Gemma tokenizers expect bare function dicts, not the OpenAI wrapper
+        tools_schema = [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["parameters"],
+            }
             for t in TOOL_DECLARATIONS
         ]
-        gen_tools = [types.Tool(function_declarations=tool_declarations)]
-        gen_config = types.GenerateContentConfig(tools=gen_tools, temperature=0.7)
 
-        # Build content list from history
-        def build_contents():
-            contents = []
-            for msg in self.history:
-                role = msg["role"]
-                if role == "user":
-                    contents.append(types.Content(role="user", parts=[types.Part(text=msg["content"])]))
-                elif role == "model":
-                    contents.append(types.Content(role="model", parts=[types.Part(text=msg["content"])]))
-                elif role == "tool_call":
-                    contents.append(types.Content(
-                        role="model",
-                        parts=[types.Part(function_call=types.FunctionCall(
-                            name=msg["name"], args=msg["args"]
-                        ))]
-                    ))
-                elif role == "tool_result":
-                    contents.append(types.Content(
-                        role="tool",
-                        parts=[types.Part(function_response=types.FunctionResponse(
-                            name=msg["name"],
-                            response={"result": msg["result"]},
-                        ))]
-                    ))
-            return contents
-
-        # Agentic loop: run until no more tool calls
+        # Agentic loop — keep going until the model returns no more tool calls
         while True:
-            contents = build_contents()
+            raw_response = self._stream_response(engine, tools_schema, temperature, max_new_tokens)
 
-            # Attempt streaming; fall back to non-streaming on error
-            response_text = ""
-            function_calls = []
+            clean_text, tool_calls = parse_tool_calls(raw_response)
 
-            try:
-                response_text, function_calls = self._stream(contents, gen_config)
-            except Exception as e:
-                console.print(f"[red]Stream error:[/] {e}")
+            if not tool_calls:
+                # Final answer — render as markdown
+                if clean_text:
+                    console.print()
+                    console.print(Markdown(clean_text))
+                    self.history.append({"role": "assistant", "content": clean_text})
                 break
 
-            if function_calls:
-                for fc in function_calls:
-                    name = fc.name
-                    args = dict(fc.args) if fc.args else {}
-
-                    if self.config.get("show_tool_calls", True):
-                        console.print(f"\n[bold cyan]◈[/] [dim]tool:[/] [bold green]{name}[/]")
-                        for k, v in args.items():
-                            v_str = str(v)
-                            if len(v_str) > 120:
-                                v_str = v_str[:120] + "…"
-                            console.print(f"  [dim]{k}:[/] {v_str}")
-
-                    result = execute(name, args)
-
-                    if self.config.get("show_tool_calls", True):
-                        preview = result[:300] + "…" if len(result) > 300 else result
-                        console.print(f"  [dim]→[/] {preview}\n")
-
-                    self.history.append({"role": "tool_call", "name": name, "args": args})
-                    self.history.append({"role": "tool_result", "name": name, "result": result})
-
-            if response_text:
-                self.history.append({"role": "model", "content": response_text})
-
-            if not function_calls:
-                break
-
-    def _stream(self, contents, gen_config) -> tuple[str, list]:
-        """Stream a response; return (accumulated_text, function_calls)."""
-        accumulated = ""
-        function_calls = []
-        show_markdown = True
-
-        printed_chars = 0
-        print_buffer = ""
-
-        import sys
-
-        for chunk in self._client.models.generate_content_stream(
-            model=self._model_id,
-            contents=contents,
-            config=gen_config,
-        ):
-            if chunk.text:
-                accumulated += chunk.text
-                print_buffer += chunk.text
-                # Flush in small bursts so the terminal feels live
-                sys.stdout.write(chunk.text)
-                sys.stdout.flush()
-
-            if chunk.candidates:
-                for candidate in chunk.candidates:
-                    if not candidate.content:
-                        continue
-                    for part in candidate.content.parts:
-                        if hasattr(part, "function_call") and part.function_call:
-                            function_calls.append(part.function_call)
-
-        if accumulated:
-            # Move to new line after raw stream, then re-render as markdown
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            if show_markdown and not function_calls:
-                # Clear the raw stream output and re-render as rich markdown
-                # (only feasible in most terminals — use ANSI escape to move up)
-                lines_printed = accumulated.count("\n") + 1
-                # Instead of clearing (fragile), just print a separator and the markdown
+            # There are tool calls to execute
+            if clean_text:
                 console.print()
-                console.rule(style="dim cyan")
-                console.print(Markdown(accumulated))
+                console.print(Markdown(clean_text))
 
-        return accumulated, function_calls
+            self.history.append({"role": "assistant", "content": raw_response})
+
+            tool_results = []
+            for tc in tool_calls:
+                name = tc["name"]
+                args = tc.get("arguments", {})
+
+                if show_tools:
+                    console.print(f"\n[bold cyan]◈[/] [dim]tool:[/] [bold green]{name}[/]")
+                    for k, v in args.items():
+                        vs = str(v)
+                        console.print(f"  [dim]{k}:[/] {vs[:120]}{'…' if len(vs) > 120 else ''}")
+
+                result = execute(name, args)
+
+                if show_tools:
+                    preview = result[:300] + "…" if len(result) > 300 else result
+                    console.print(f"  [dim]→[/] {preview}\n")
+
+                tool_results.append(f"[{name}] {result}")
+
+            # Feed all tool results back as a single user message
+            combined = "\n\n".join(tool_results)
+            self.history.append({"role": "user", "content": f"<tool_response>\n{combined}\n</tool_response>"})
+
+    # ── streaming helper ───────────────────────────────────────────────────────
+
+    def _stream_response(
+        self,
+        engine: LocalEngine,
+        tools_schema: list,
+        temperature: float,
+        max_new_tokens: int,
+    ) -> str:
+        """Stream tokens to stdout and return the full raw response string."""
+        accumulated = []
+        try:
+            for token in engine.stream(
+                self.history,
+                tools=tools_schema,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+            ):
+                sys.stdout.write(token)
+                sys.stdout.flush()
+                accumulated.append(token)
+        except KeyboardInterrupt:
+            console.print("\n[dim](interrupted)[/]")
+
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return "".join(accumulated)

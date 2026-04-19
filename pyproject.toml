@@ -5,12 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "gemma-cli"
 version = "0.1.0"
-description = "A blazingly fast Gemma 4 CLI"
+description = "A blazingly fast local Gemma 4 CLI"
 requires-python = ">=3.9"
 dependencies = [
     "rich>=13.7",
     "prompt-toolkit>=3.0",
-    "google-genai>=1.0",
+    "transformers>=4.50",
+    "torch>=2.3",
+    "accelerate>=0.30",
+    "huggingface-hub>=0.23",
 ]
 
 [project.scripts]
