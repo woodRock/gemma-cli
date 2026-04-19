@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / compiled files
+__pycache__/
+*.pyc
+*$py.cache
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Distribution / packaging
+.Python
+build/
+docs/_build
+html.in
+*.egg-info/
+dist/
+
+# Operating System
+.DS_Store
+
+# Editor files
+*.swp
+*.swo

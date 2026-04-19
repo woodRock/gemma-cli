@@ -156,8 +156,12 @@ _PARAM_RE = re.compile(
 
 
 def _clean_value(v: str) -> str:
-    """Strip markdown backtick formatting that the model sometimes wraps values in."""
-    return v.strip().strip("`")
+    """Strip quote/backtick wrapping the model sometimes adds around values."""
+    v = v.strip()
+    for ch in ('`', '"', "'"):
+        if v.startswith(ch) and v.endswith(ch) and len(v) > 1:
+            v = v[1:-1]
+    return v
 
 
 def parse_tool_calls(text: str) -> tuple[str, list]:
