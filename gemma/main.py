@@ -21,12 +21,10 @@ PROMPT_STYLE = Style.from_dict({
 
 def _bottom_toolbar(session: ChatSession):
     from gemma.models import get_model
-    from gemma.inference import detect_device
     model = get_model(session.config.get("model", "e4b"))
-    device = detect_device()
     return HTML(
         f'<b><style fg="ansicyan"> ◈ {model.name}</style></b>'
-        f'<style fg="ansibrightblack">  {device}  ·  /help · /model · /pull · /reset · /exit</style>'
+        f'<style fg="ansibrightblack">  mlx  ·  /help · /model · /pull · /reset · /exit</style>'
     )
 
 
@@ -71,7 +69,9 @@ def main():
         except KeyboardInterrupt:
             console.print("\n[dim](Interrupted)[/]")
         except Exception as e:
+            import traceback
             console.print(f"[bold red]Error:[/] {e}")
+            console.print("[dim]" + traceback.format_exc() + "[/]")
 
 
 if __name__ == "__main__":

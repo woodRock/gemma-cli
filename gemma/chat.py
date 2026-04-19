@@ -5,7 +5,6 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from gemma.inference import LocalEngine, parse_tool_calls
-from gemma.config import MODEL_CACHE_DIR
 
 console = Console()
 
@@ -26,7 +25,7 @@ class ChatSession:
             if self._engine is not None:
                 self._engine.unload()
             model = get_model(key)
-            self._engine = LocalEngine(model.hf_id, MODEL_CACHE_DIR)
+            self._engine = LocalEngine(model.hf_id)
             self._engine.load()
             self._current_model_key = key
         return self._engine
